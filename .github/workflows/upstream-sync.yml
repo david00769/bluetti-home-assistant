@@ -3,8 +3,9 @@
 # The fork carries patches (unattended sign-in) that upstream has not merged
 # yet. HACS installs this fork, so an upstream release never lands on its own;
 # this job does the mechanical part: merge the new upstream tag into a
-# sync/<tag> branch, set the version to <tag>+sugarloaf.1, run the tests and
-# open a PR into `sugarloaf`. Merging (not rebasing) keeps history intact, so
+# sync/<tag> branch, run the tests and open a PR into `sugarloaf`. The release
+# that follows is tagged <tag>+sugarloaf.1; manifest.json keeps upstream's
+# version, because the cloud validates it. Merging (not rebasing) keeps history intact, so
 # nothing is ever force-pushed. A conflict or a test failure opens an issue
 # instead. Publishing a release stays a human decision.
 name: Upstream sync
@@ -59,14 +60,10 @@ jobs:
             echo "conflict=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          python3 - "$tag" <<'EOF'
-          import json, sys
-          p = 'custom_components/bluetti/manifest.json'
-          m = json.load(open(p))
-          m['version'] = sys.argv[1].lstrip('v') + '+sugarloaf.1'
-          open(p, 'w').write(json.dumps(m, indent=2) + '\n')
-          EOF
-          git commit -am "Version ${tag#v}+sugarloaf.1"
+          # The merge brings upstream's manifest version, which must stay as is:
+          # the integration sends it to the BLUETTI cloud as app-ver, and the
+          # cloud rejects anything it does not know ("invalid application
+          # version"). The +sugarloaf.N label lives only on the release tag.
 
       - uses: actions/setup-python@v5
         if: steps.upstream.outputs.new == 'true' && steps.merge.outputs.conflict != 'true'
