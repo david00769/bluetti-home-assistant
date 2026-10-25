@@ -1,0 +1,99 @@
+# Bring each new bluetti-official release into this fork for review.
+#
+# The fork carries patches (unattended sign-in) that upstream has not merged
+# yet. HACS installs this fork, so an upstream release never lands on its own;
+# this job does the mechanical part: merge the new upstream tag into a
+# sync/<tag> branch, set the version to <tag>+sugarloaf.1, run the tests and
+# open a PR into `sugarloaf`. Merging (not rebasing) keeps history intact, so
+# nothing is ever force-pushed. A conflict or a test failure opens an issue
+# instead. Publishing a release stays a human decision.
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "17 21 * * *"   # daily, 08:17 Melbourne
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sugarloaf
+          fetch-depth: 0
+
+      - name: Find the latest upstream release
+        id: upstream
+        run: |
+          tag=$(gh api repos/bluetti-official/bluetti-home-assistant/releases/latest --jq .tag_name)
+          base=$(python3 -c "import json;print(json.load(open('custom_components/bluetti/manifest.json'))['version'].split('+')[0])")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "${tag#v}" = "$base" ]; then
+            echo "Fork already based on $tag"; echo "new=false" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --heads origin "sync/$tag" >/dev/null; then
+            echo "sync/$tag already exists"; echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge the upstream tag
+        if: steps.upstream.outputs.new == 'true'
+        id: merge
+        run: |
+          tag='${{ steps.upstream.outputs.tag }}'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/bluetti-official/bluetti-home-assistant.git
+          git fetch --tags upstream
+          git switch -c "sync/$tag"
+          if ! git merge --no-edit "$tag"; then
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 - "$tag" <<'EOF'
+          import json, sys
+          p = 'custom_components/bluetti/manifest.json'
+          m = json.load(open(p))
+          m['version'] = sys.argv[1].lstrip('v') + '+sugarloaf.1'
+          open(p, 'w').write(json.dumps(m, indent=2) + '\n')
+          EOF
+          git commit -am "Version ${tag#v}+sugarloaf.1"
+
+      - uses: actions/setup-python@v5
+        if: steps.upstream.outputs.new == 'true' && steps.merge.outputs.conflict != 'true'
+        with:
+          python-version: "3.13"
+
+      - name: Test
+        if: steps.upstream.outputs.new == 'true' && steps.merge.outputs.conflict != 'true'
+        id: test
+        run: |
+          pip install -q -r requirements_test.txt
+          if python -m pytest -q -p no:cacheprovider > test.log 2>&1; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+          tail -20 test.log
+
+      - name: Open a PR
+        if: steps.test.outputs.ok == 'true'
+        run: |
+          tag='${{ steps.upstream.outputs.tag }}'
+          git push origin "sync/$tag"
+          gh pr create --base sugarloaf --head "sync/$tag" \
+            --title "Merge upstream $tag" \
+            --body "bluetti-official released $tag. It merged cleanly into the fork and the tests pass. Review the upstream changes to oauth.py, __init__.py and api/ before merging, then publish \`${tag#v}+sugarloaf.1\` as a release so HACS offers it. If upstream now contains the unattended sign-in, switch HACS back to bluetti-official instead."
+
+      - name: Report a conflict or a test failure
+        if: steps.merge.outputs.conflict == 'true' || steps.test.outputs.ok == 'false'
+        run: |
+          tag='${{ steps.upstream.outputs.tag }}'
+          why=$([ '${{ steps.merge.outputs.conflict }}' = 'true' ] && echo "the merge conflicts" || echo "the tests fail after merging")
+          gh issue create --title "Upstream $tag needs manual sync" \
+            --body "bluetti-official released $tag but $why. The deployed fork is unchanged. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
