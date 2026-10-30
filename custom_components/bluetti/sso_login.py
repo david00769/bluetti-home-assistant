@@ -87,7 +87,10 @@ async def async_login(
     try:
         async with session.get(sso_base + LOGIN_PATH, params=query) as resp:
             await resp.read()
-        form = aiohttp.FormData()
+        # Multipart, as the login page sends it: for a FormData of text fields only, aiohttp
+        # otherwise sends application/x-www-form-urlencoded, which the SSO answers with
+        # HTTP 415 (seen 2026-10-31; the unattended sign-in then always failed).
+        form = aiohttp.FormData(default_to_multipart=True)
         for key, value in fields.items():
             form.add_field(key, value)
         async with session.post(sso_base + AUTHENTICATION_PATH, data=form) as resp:

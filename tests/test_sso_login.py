@@ -49,6 +49,19 @@ async def test_sign_in_posts_the_form_and_exchanges_the_code():
 
 
 @pytest.mark.asyncio
+async def test_the_form_is_posted_as_multipart():
+    # The SSO answers HTTP 415 to application/x-www-form-urlencoded, which aiohttp sends for a
+    # text-only FormData unless told otherwise; the login page posts multipart/form-data.
+    impl = implementation()
+    with aioresponses() as m:
+        m.get(LOGIN_RE, status=200, body="")
+        m.post(AUTH_URL, payload={"msgCode": 0, "data": REDIRECT + "?code=abc"})
+        await sso_login.async_login(SSO, impl, "me@example.com", "DIGEST")
+        form = m.requests[("POST", __import__("yarl").URL(AUTH_URL))][0].kwargs["data"]
+    assert form.is_multipart
+
+
+@pytest.mark.asyncio
 async def test_a_failed_code_exchange_is_an_sso_login_error():
     impl = implementation()
     impl.async_resolve_external_data.side_effect = KeyError("expires_in")
